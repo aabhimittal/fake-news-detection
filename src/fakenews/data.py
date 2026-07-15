@@ -96,6 +96,44 @@ def generate_synthetic_dataset(
     return pd.DataFrame(rows)
 
 
+def generate_benchmark_dataset(
+    n_per_class: int = 400,
+    noise: float = 0.25,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """A deliberately *harder* variant for benchmarking.
+
+    The plain synthetic corpus is perfectly separable, so every classifier
+    scores ~1.0 and a benchmark can't tell them apart. Here we blur the classes
+    two ways, controlled by ``noise`` (0 = easy, 1 = very hard):
+
+    * **Style crossover** — a fraction of *fake* stories are written in neutral
+      wire-copy style, and a fraction of *real* ones adopt sensational phrasing.
+    * **Label noise** — a fraction of labels are flipped outright.
+
+    The result rewards models that pick up subtler cues, which is what makes a
+    benchmark across classifiers meaningful.
+    """
+    rng = random.Random(random_state)
+    rows = []
+    for _ in range(n_per_class):
+        for label in (0, 1):
+            # Style crossover: with probability `noise/2`, write in the *other*
+            # class's style while keeping the true label.
+            flip_style = rng.random() < noise / 2
+            if (label == 0) != flip_style:      # real style
+                text = _real_article(rng)
+            else:                               # fake style
+                text = _fake_article(rng)
+            # Label noise: occasionally flip the label outright.
+            y = label
+            if rng.random() < noise / 2:
+                y = 1 - y
+            rows.append({"text": text, "label": y})
+    rng.shuffle(rows)
+    return pd.DataFrame(rows)
+
+
 def load_dataset(
     path: Optional[Path] = None,
     *,

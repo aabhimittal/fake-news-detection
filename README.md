@@ -34,11 +34,14 @@ and — importantly — a conceptual explanation of *why* each algorithm works.
   - [Step 4: The classifier](#step-4-the-classifier)
   - [Step 5: Evaluation](#step-5-evaluation)
   - [Step 6: Explainability](#step-6-explainability)
+  - [Step 7: A fine-tuned transformer](#step-7-a-fine-tuned-transformer)
+  - [Step 8: Benchmarking on real data](#step-8-benchmarking-on-real-data)
 - [Part 2 — Stopping propagation](#part-2--stopping-propagation)
   - [Step 1: Modelling the network](#step-1-modelling-the-network)
   - [Step 2: Modelling the spread](#step-2-modelling-the-spread)
   - [Step 3: Containment strategies](#step-3-containment-strategies)
-  - [Step 4: The result](#step-4-the-result)
+  - [Step 4: Greedy influence-maximisation](#step-4-greedy-influence-maximisation)
+  - [Step 5: The result](#step-5-the-result)
 - [Project layout](#project-layout)
 - [Using your own dataset](#using-your-own-dataset)
 - [REST API](#rest-api)
@@ -152,6 +155,62 @@ document toward its verdict:
 +0.379  tfidf__deleted           -> fake
 ```
 
+### Step 7: A fine-tuned transformer
+
+The linear model sees *words*, not *context*, so cleverly-worded misinformation
+that dodges the obvious clickbait vocabulary can slip past it. A pretrained
+**transformer** (DistilBERT) fixes that: it arrives already knowing English from
+massive self-supervised pretraining, and **self-attention** lets every token be
+represented *in context*. We only **fine-tune** it — a couple of epochs on our
+labelled data — so it learns the task from a few hundred examples.
+
+`TransformerDetector` mirrors the `FakeNewsDetector` interface exactly, so it's a
+drop-in swap. It's an optional extra (needs `torch` + `transformers`):
+
+```bash
+pip install "fakenews[transformer]"
+python -m fakenews.cli train   --arch transformer          # fine-tunes DistilBERT
+python -m fakenews.cli predict --arch transformer "paraphrased misinformation here"
+```
+
+```python
+from fakenews.transformer import TransformerDetector
+det = TransformerDetector()
+det.fit()                                   # downloads + fine-tunes
+det.predict("BREAKING bombshell truth they hid from you!!!")   # -> FAKE
+```
+
+**Trade-off:** the transformer captures meaning the linear model can't, but costs
+orders of magnitude more compute and loses the free per-feature explanations.
+The linear model remains an excellent, interpretable default; reach for the
+transformer when subtle, context-dependent phrasing matters.
+
+### Step 8: Benchmarking on real data
+
+One train/test split is one noisy number. To compare models *fairly* the
+`benchmark` command runs **stratified k-fold cross-validation** — every model is
+trained and tested on the identical folds — and reports mean ± standard
+deviation, so you see both skill and stability:
+
+```bash
+python -m fakenews.cli benchmark --noise 0.3        # synthetic, deliberately hard
+python -m fakenews.cli benchmark --dataset path/to/news.csv --cv 5
+```
+
+```
+        classifier |      accuracy |     F1 (fake) |     fit
+------------------------------------------------------------
+       naive_bayes | 0.745 ± 0.041 | 0.740 ± 0.035 |   0.03s
+          logistic | 0.680 ± 0.022 | 0.673 ± 0.026 |   0.04s
+        linear_svm | 0.655 ± 0.015 | 0.641 ± 0.027 |   0.05s
+passive_aggressive | 0.640 ± 0.037 | 0.590 ± 0.050 |   0.03s
+```
+
+The harness ships loaders for the two most common public corpora —
+`fakenews.benchmark.load_liar` (the LIAR dataset) and `load_kaggle_fake_real`
+(Kaggle *Fake and Real News*) — so pointing the benchmark at real data is a
+one-liner. See [Using your own dataset](#using-your-own-dataset).
+
 ---
 
 ## Part 2 — Stopping propagation
@@ -193,6 +252,7 @@ With a limited budget, *where* you place monitors is everything:
 |----------|------|-------------------------------|
 | `degree` | Immunise the biggest hubs | Yes |
 | `betweenness` | Immunise the best bridges between communities | Yes |
+| `greedy` | Immunise the node that most reduces *simulated* spread, repeatedly | Yes (+ a simulator) |
 | `acquaintance` | Pick a random user, immunise a random *friend* of theirs | **No** — local only |
 | `random` | Immunise random users (null baseline) | No |
 | `none` | Do nothing (measures the untamed cascade) | — |
@@ -202,7 +262,33 @@ node is disproportionately likely to be a hub (the "friendship paradox"), so it
 targets influential users **without ever needing a full map of the network** —
 exactly the constraint a real platform faces.
 
-### Step 4: The result
+### Step 4: Greedy influence-maximisation
+
+The centrality heuristics are cheap *proxies* for the thing we actually care
+about: expected spread. The **greedy** strategy optimises that objective
+directly — each round it immunises the node whose removal reduces the simulated
+cascade the most:
+
+```
+select monitors greedily:
+  repeat until budget spent:
+    for each candidate node v:
+      estimate expected spread if we also immunise v   (Monte-Carlo)
+    immunise the v with the largest reduction
+```
+
+A subtle but important point: influence **maximisation** (choosing seeds to
+*spread* a message) is submodular, which is what lets the classic **CELF**
+algorithm skip almost all re-evaluations. Node **immunisation** — choosing
+blockers to *minimise* spread — is **not** submodular: removing one node can
+*raise* another's value by putting it on a newly-critical path. We verified that
+the lazy CELF shortcut picks a strictly worse set here, so the implementation
+deliberately runs the exact greedy (re-evaluating every candidate each round),
+restricted to a high-degree candidate pool for tractability. This is a nice
+illustration of *why you must check the submodularity assumption before reaching
+for the fast algorithm.* (Full discussion in [`docs/CONCEPTS.md`](docs/CONCEPTS.md).)
+
+### Step 5: The result
 
 Running `python -m fakenews.cli simulate` reproduces the core finding:
 
@@ -212,12 +298,20 @@ Running `python -m fakenews.cli simulate` reproduces the core finding:
          none |     45.4 |   35.1 |              0.0%
        degree |     29.9 |   25.9 |             34.3%
   betweenness |     30.0 |   25.9 |             33.9%
+       greedy |     29.9 |   25.9 |             34.3%
  acquaintance |     39.2 |   31.4 |             13.6%
        random |     43.1 |   33.7 |              5.0%
 ```
 
 **Targeting hubs cuts total spread by a third**, and even the knowledge-free
 acquaintance heuristic roughly triples the effectiveness of random monitoring.
+Notice the **greedy** optimum lands right on top of `degree` — on scale-free
+networks the cascade *must* funnel through hubs, so degree-immunisation is
+already near-optimal. Greedy's value is that it reaches that optimum by
+optimising the objective *directly*, making no assumption about which structural
+property happens to matter; when the network isn't cleanly hub-dominated, the
+cheap heuristics diverge and greedy keeps tracking the best of them.
+
 The lesson: *spend your scarce fact-checking budget on the structurally
 important accounts, not uniformly.*
 
@@ -234,7 +328,9 @@ fake-news-detection/
 │   ├── features.py       # TF-IDF + stylometric transformers
 │   ├── models.py         # pipeline construction + persistence
 │   ├── evaluate.py       # metrics & reporting
-│   ├── detect.py         # FakeNewsDetector — the high-level API
+│   ├── detect.py         # FakeNewsDetector — the high-level linear API
+│   ├── transformer.py    # TransformerDetector — optional fine-tuned DistilBERT
+│   ├── benchmark.py      # cross-validation harness + LIAR/Kaggle loaders
 │   ├── propagation.py    # network, diffusion model, containment strategies
 │   └── cli.py            # `python -m fakenews.cli ...`
 ├── app/api.py            # optional Flask REST demo
@@ -259,7 +355,17 @@ python -m fakenews.cli train --dataset path/to/news.csv --classifier passive_agg
 
 Popular public options: the Kaggle *Fake and Real News* dataset, *LIAR*, or
 *FakeNewsNet*. Map your columns to `text` / `label` (1 = fake) — the loader
-handles the rename.
+handles the rename. For the two most common corpora there are purpose-built
+loaders so you don't have to reshape anything:
+
+```python
+from fakenews.benchmark import load_liar, load_kaggle_fake_real, cross_validate_classifiers
+
+df = load_liar("liar_dataset/train.tsv")                 # 6-way -> binary
+# df = load_kaggle_fake_real("Fake.csv", "True.csv")
+for row in cross_validate_classifiers(df, cv=5):
+    print(row.format())
+```
 
 ## REST API
 

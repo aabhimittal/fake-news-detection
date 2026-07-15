@@ -1,4 +1,4 @@
-.PHONY: help install install-dev data train predict simulate test clean
+.PHONY: help install install-dev data train predict simulate benchmark train-transformer test clean
 
 PY ?= python3
 
@@ -10,6 +10,8 @@ help:
 	@echo "  train        Train the classifier and save the model"
 	@echo "  predict      Score an example headline"
 	@echo "  simulate     Run the propagation / containment experiment"
+	@echo "  benchmark    Cross-validate and compare the classifiers"
+	@echo "  train-transformer  Fine-tune the DistilBERT detector (needs extras)"
 	@echo "  test         Run the unit-test suite"
 	@echo "  clean        Remove caches and generated artefacts"
 
@@ -30,6 +32,12 @@ predict:
 
 simulate:
 	$(PY) -m fakenews.cli simulate
+
+benchmark:
+	$(PY) -m fakenews.cli benchmark
+
+train-transformer:
+	$(PY) -m fakenews.cli train --arch transformer
 
 test:
 	$(PY) -m pytest

@@ -6,6 +6,7 @@ networkx>=2.8
 joblib>=1.1
 
 # Optional extras (install as needed):
-#   matplotlib>=3.5   # plotting the propagation curves (scripts/plot_propagation.py)
-#   flask>=2.2        # the demo REST API (app/api.py)
-#   pytest>=7.0       # running the test suite
+#   matplotlib>=3.5              # propagation curves (scripts/plot_propagation.py)
+#   flask>=2.2                   # the demo REST API (app/api.py)
+#   torch>=1.12 transformers>=4.20  # the fine-tuned transformer detector
+#   pytest>=7.0                  # running the test suite

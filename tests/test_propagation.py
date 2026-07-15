@@ -50,7 +50,7 @@ def test_containment_reduces_spread():
 
 
 def test_all_strategies_run():
-    cfg = _fast_config(n_monitors=10)
+    cfg = _fast_config(n_monitors=10, greedy_sims=5, greedy_pool=25)
     g = build_social_graph(cfg)
     seeds = choose_seeds(g, cfg)
     for strat in STRATEGIES:
@@ -58,3 +58,25 @@ def test_all_strategies_run():
         res = simulate(g, config=c, seeds=seeds)
         assert res.total_reached >= 0
         assert len(res.timeline) == cfg.max_steps + 1
+
+
+def test_greedy_respects_budget_and_excludes_seeds():
+    cfg = _fast_config(strategy="greedy", n_monitors=8, greedy_sims=5, greedy_pool=25)
+    g = build_social_graph(cfg)
+    seeds = choose_seeds(g, cfg)
+    monitors = select_monitors(g, cfg, exclude=set(seeds), seeds=seeds)
+    assert len(monitors) == 8
+    assert not (monitors & set(seeds))  # never immunise a seed
+
+
+def test_greedy_matches_or_beats_the_best_heuristic():
+    """Greedy directly optimises spread, so it should at least tie degree."""
+    cfg = _fast_config(n_monitors=20, activation_prob=0.12, greedy_sims=12, greedy_pool=40)
+    results = compare_strategies(
+        cfg, strategies=("none", "degree", "random", "greedy")
+    )
+    # Beats the null baseline comfortably ...
+    assert results["greedy"].total_reached < results["random"].total_reached
+    # ... and is competitive with the strong degree heuristic (allow a small
+    # Monte-Carlo margin).
+    assert results["greedy"].total_reached <= results["degree"].total_reached * 1.1
