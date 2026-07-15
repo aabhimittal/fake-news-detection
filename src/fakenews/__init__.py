@@ -11,8 +11,8 @@ entry points most users want are :class:`fakenews.detect.FakeNewsDetector`
 and :func:`fakenews.propagation.simulate_campaign`.
 """
 
-from .config import ModelConfig, PropagationConfig
+from .config import ModelConfig, PropagationConfig, TransformerConfig
 
-__all__ = ["ModelConfig", "PropagationConfig", "__version__"]
+__all__ = ["ModelConfig", "PropagationConfig", "TransformerConfig", "__version__"]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

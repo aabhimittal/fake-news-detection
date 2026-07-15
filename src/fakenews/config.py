@@ -18,6 +18,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 MODELS_DIR = PROJECT_ROOT / "models"
 
 DEFAULT_MODEL_PATH = MODELS_DIR / "fakenews_pipeline.joblib"
+DEFAULT_TRANSFORMER_PATH = MODELS_DIR / "fakenews_transformer"
 DEFAULT_DATASET_PATH = DATA_DIR / "sample_news.csv"
 
 
@@ -45,6 +46,27 @@ class ModelConfig:
 
 
 @dataclass
+class TransformerConfig:
+    """Hyper-parameters for the fine-tuned transformer detector.
+
+    Defaults target a *fast, CPU-friendly* demonstration. ``distilbert-base-uncased``
+    fine-tunes in seconds per epoch on the small synthetic corpus; swap in a
+    larger checkpoint (or more epochs) for real datasets.
+    """
+
+    model_name: str = "distilbert-base-uncased"
+    max_length: int = 128        # token truncation length
+    batch_size: int = 16
+    epochs: int = 2
+    learning_rate: float = 5e-5
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
+    test_size: float = 0.2
+    random_state: int = 42
+    device: str = "auto"         # "auto" | "cpu" | "cuda"
+
+
+@dataclass
 class PropagationConfig:
     """Parameters for the social-network propagation simulation."""
 
@@ -63,7 +85,14 @@ class PropagationConfig:
     n_monitors: int = 25        # budget for the containment strategy
 
     # Which containment strategy to evaluate.
-    # One of: "none", "degree", "betweenness", "random", "acquaintance".
+    # One of: "none", "degree", "betweenness", "random", "acquaintance", "greedy".
     strategy: str = "degree"
 
     n_simulations: int = 40     # Monte-Carlo repetitions to average over
+
+    # --- greedy / CELF influence-maximisation containment ---
+    # These control the simulation-driven greedy strategy, which is far more
+    # expensive than the centrality heuristics, so the defaults trade a little
+    # accuracy for tractability.
+    greedy_sims: int = 12       # Monte-Carlo runs per marginal-gain evaluation
+    greedy_pool: int = 60       # restrict greedy search to the top-N degree nodes

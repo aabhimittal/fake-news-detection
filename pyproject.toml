@@ -24,6 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 viz = ["matplotlib>=3.5"]
 api = ["flask>=2.2"]
+transformer = ["torch>=1.12", "transformers>=4.20"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
@@ -35,3 +36,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+filterwarnings = [
+    # PassiveAggressiveClassifier is deprecated upstream in scikit-learn 1.8+;
+    # we still support it across our pinned range, so silence the noise.
+    "ignore:Class PassiveAggressiveClassifier is deprecated:FutureWarning",
+]

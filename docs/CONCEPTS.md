@@ -89,6 +89,43 @@ For a moderation system the costs are asymmetric:
 fall. Accuracy alone can hide a model that never catches the fake class on an
 imbalanced corpus.
 
+### 1.6 Cross-validation: comparing models fairly
+
+A single train/test split yields one number that depends on *which* rows landed
+in the test set. **Stratified k-fold cross-validation** removes that luck: the
+data is partitioned into `k` folds (each preserving the class balance), and each
+model is trained on `k-1` folds and evaluated on the held-out one, rotating
+through all `k`. Reporting **mean ± standard deviation** across folds captures
+both how good a model is and how *stable* that estimate is — a model with high
+mean but huge variance is not something to deploy. Because every model is scored
+on the *same* folds, the comparison is apples-to-apples. This is what
+`fakenews.benchmark` does.
+
+### 1.7 Beyond bag-of-words: fine-tuned transformers
+
+TF-IDF discards word order and context: "not fake at all" and "fake, not at all"
+share a bag of words. **Transformers** (BERT, DistilBERT) fix this with
+**self-attention** — each token's representation is a learned, weighted blend of
+every other token in the sentence, so a word is encoded *in context*.
+
+The decisive practical idea is **transfer learning via fine-tuning**:
+
+1. **Pretraining** (done for us, once, at great expense) — the model learns
+   general language structure from billions of words of unlabelled text via
+   self-supervised objectives (masked-word prediction).
+2. **Fine-tuning** (what we do) — we attach a small classification head and
+   continue training for a *couple of epochs* on our few hundred labelled
+   fake/real examples. Because the model already "knows English", it needs very
+   little task-specific data to specialise.
+
+This buys accuracy on subtle, paraphrased misinformation that dodges obvious
+clickbait vocabulary. The costs are real, though: orders of magnitude more
+compute, and the loss of the linear model's free per-feature explanations (a
+transformer's decision is distributed across millions of weights). The
+interpretable linear model and the contextual transformer are complementary, not
+rivals — `fakenews.transformer.TransformerDetector` deliberately shares the
+`FakeNewsDetector` interface so you can swap between them.
+
 ---
 
 ## 2. Propagation: from a label to a stopped cascade
@@ -146,16 +183,56 @@ computing degrees or seeing the whole graph** — the realistic setting for a
 platform that can only observe local interactions. That's why, in our results,
 it lands between random and full-knowledge degree targeting.
 
-### 2.5 Reading the result
+### 2.5 Greedy immunisation, and a submodularity trap
+
+The centrality strategies are heuristics — cheap stand-ins for the real
+objective, *minimise expected spread*. The **greedy** strategy optimises that
+objective directly: repeatedly immunise whichever node reduces the simulated
+cascade the most (its **marginal gain**), estimated by Monte-Carlo.
+
+The interesting twist is about **submodularity**. A set function `f` is
+submodular if marginal gains shrink as the set grows ("diminishing returns"):
+
+```
+gain(v | S)  ≥  gain(v | T)     whenever  S ⊆ T
+```
+
+- **Influence maximisation** — choosing *seeds* to maximise spread — is monotone
+  and submodular (Kempe–Kleinberg–Tardos). Submodularity guarantees the greedy
+  solution is within `(1 − 1/e) ≈ 63%` of optimal, **and** it licenses the
+  **CELF** speed-up: a stale marginal gain is a valid *upper bound*, so you can
+  keep candidates in a max-heap and re-evaluate only the current top one — often
+  a handful of simulations per round instead of hundreds.
+
+- **Node immunisation** — choosing *blockers* to minimise spread — is **not**
+  submodular in general. Removing one node can *increase* another node's
+  marginal value, because a previously-redundant node may now sit on the only
+  remaining path. When that happens, CELF's upper-bound assumption is violated
+  and its lazy skipping locks in a worse set.
+
+We hit exactly this: the lazy CELF variant selected a strictly worse monitor set
+than the exact greedy, so `fakenews.propagation` runs the **exact** greedy
+(re-evaluating every candidate each round), trading CELF's speed for correctness
+and capping cost with a high-degree candidate pool instead. The lesson is
+general: *the fast algorithm is only correct when its structural assumption
+holds — check submodularity before you reach for CELF.*
+
+### 2.6 Reading the result
 
 ```
 strategy      reached   reduction vs none
 none            45.4          0.0%
-degree          29.9         34.3%   ← hub targeting: best, needs global info
+degree          29.9         34.3%   ← hub targeting: best heuristic, needs global info
 betweenness     30.0         33.9%   ← bridge targeting: comparable
+greedy          29.9         34.3%   ← optimises spread directly; matches degree here
 acquaintance    39.2         13.6%   ← local-only, still 3× better than random
 random          43.1          5.0%   ← spreading budget thinly barely helps
 ```
+
+Greedy tying `degree` is itself informative: on scale-free graphs the cascade
+must funnel through hubs, so hub-immunisation is already near-optimal and greedy
+confirms it — while making *no* structural assumption, which is what keeps it
+robust when a network is *not* cleanly hub-dominated.
 
 **Takeaway:** structure beats volume. A handful of well-chosen fact-checkers on
 the right accounts contains a cascade far better than many placed at random —

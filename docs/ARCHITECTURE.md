@@ -13,9 +13,11 @@ fakenews/
 ├── features.py      TextCleaner, StylometricFeatures, build_tfidf()
 ├── models.py        build_pipeline(), save_model(), load_model()
 ├── evaluate.py      evaluate() -> EvaluationResult
-├── detect.py        FakeNewsDetector — the public façade
+├── detect.py        FakeNewsDetector — the linear public façade
+├── transformer.py   TransformerDetector — optional fine-tuned DistilBERT
+├── benchmark.py     cross-validation harness + LIAR/Kaggle loaders
 ├── propagation.py   graph + Independent Cascade + containment strategies
-└── cli.py           argparse entry point (train / predict / simulate / make-data)
+└── cli.py           argparse entry point (train / predict / simulate / benchmark / make-data)
 ```
 
 Dependencies flow one way: `cli` → `detect`/`propagation` → `models`/`features`
@@ -74,31 +76,55 @@ named features. Callers never touch numpy arrays directly.
 - **`_single_cascade` / `simulate`** — the *mechanics* of diffusion, independent
   of policy.
 
-This makes it easy to benchmark a new containment idea against the existing five
+This makes it easy to benchmark a new containment idea against the existing six
 without touching the simulator, and `compare_strategies` guarantees every policy
 is evaluated on the *same* graph and seed set for a fair comparison.
 
+### 6. Optional heavy dependencies stay optional
+
+`transformer.py` needs `torch` + `transformers`, which the core package must not
+require. The rule enforced here: **never import the heavy backend at module
+top-level.** A tiny `_require_backend()` helper imports them lazily inside the
+methods that use them and raises an actionable `ImportError` (pointing at
+`pip install "fakenews[transformer]"`) otherwise. So `import fakenews` stays
+light, the linear pipeline works with no deep-learning stack installed, and the
+transformer is a genuine drop-in that shares the `FakeNewsDetector` interface
+(`fit`/`predict`/`save`/`load`) — the CLI selects between them with `--arch`.
+
+### 7. Benchmarking is split-agnostic
+
+`benchmark.py` takes any `text`/`label` DataFrame and cross-validates every
+classifier on a *single shared* `StratifiedKFold` splitter, so the models are
+compared on identical folds. Real-corpus specifics (LIAR's 6-way scale, Kaggle's
+two-file layout) live in dedicated loaders that normalise down to the same
+`text`/`label` frame, keeping the harness itself corpus-agnostic.
+
 ## Testing strategy
 
-`tests/` (25 tests, pytest) covers each module at the right altitude:
+`tests/` (35+ tests, pytest) covers each module at the right altitude:
 
 - **Unit** — preprocessing rules, stylometric feature values, dataset shape and
-  determinism, graph size, monitor-budget selection.
+  determinism, graph size, monitor-budget selection, LIAR label mapping.
 - **Behavioural** — the detector actually learns the signal (`accuracy ≥ 0.85`),
   round-trips through save/load, and explains linear decisions; containment
-  actually reduces spread (`degree < none`).
+  actually reduces spread and greedy matches the best heuristic; cross-validated
+  classifiers beat chance.
+- **Opt-in / guarded** — the transformer's end-to-end fine-tune test downloads a
+  real checkpoint, so it runs only when `torch`+`transformers` are present *and*
+  `FAKENEWS_RUN_TRANSFORMER=1` is set. Its interface contracts (predict-before-
+  fit, config defaults, the no-backend error path) always run.
 
 `conftest.py` puts `src/` on the path so tests run without an editable install.
-Simulation tests use small graphs and few Monte-Carlo runs to stay fast (<2 s
-for the whole suite) while still asserting the qualitative result.
+Simulation and greedy tests use small graphs and few Monte-Carlo runs to stay
+fast while still asserting the qualitative result.
 
 ## Extending the project
 
-- **Better detection** — swap the linear head for a fine-tuned transformer;
-  keep the `FakeNewsDetector` interface so the CLI/API are unchanged.
 - **Richer features** — add source-credibility, readability, or
   network-metadata blocks to the `FeatureUnion`.
-- **Smarter containment** — implement the greedy influence-maximisation
-  heuristic (CELF) as a new `select_monitors` branch and benchmark it.
+- **Larger transformers** — point `TransformerConfig.model_name` at a bigger
+  checkpoint (RoBERTa, DeBERTa) or add more epochs for real corpora.
+- **Temporal containment** — let monitors be *placed* mid-cascade based on early
+  detection signal, rather than pre-positioned.
 - **Real-time** — feed a stream into the `passive_aggressive` model with
   `partial_fit` for online updates.
