@@ -1,0 +1,11 @@
+scikit-learn>=1.1
+pandas>=1.4
+numpy>=1.22
+scipy>=1.8
+networkx>=2.8
+joblib>=1.1
+
+# Optional extras (install as needed):
+#   matplotlib>=3.5   # plotting the propagation curves (scripts/plot_propagation.py)
+#   flask>=2.2        # the demo REST API (app/api.py)
+#   pytest>=7.0       # running the test suite
