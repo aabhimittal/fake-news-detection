@@ -180,6 +180,15 @@ class TransformerDetector:
                     )
         return out
 
+    def predict_proba(self, texts: Sequence[str]):
+        """P(fake) per document, mirroring FakeNewsDetector.predict_proba."""
+        import numpy as np
+
+        return np.array([
+            p.confidence if p.is_fake else 1.0 - p.confidence
+            for p in self.predict_batch(texts)
+        ])
+
     def predict(self, text: str) -> Prediction:
         return self.predict_batch([text])[0]
 

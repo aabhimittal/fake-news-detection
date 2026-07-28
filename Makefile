@@ -1,4 +1,4 @@
-.PHONY: help install install-dev data train predict simulate benchmark train-transformer test clean
+.PHONY: help install install-dev data train predict simulate benchmark robustness triage early-detect train-transformer test clean
 
 PY ?= python3
 
@@ -11,6 +11,9 @@ help:
 	@echo "  predict      Score an example headline"
 	@echo "  simulate     Run the propagation / containment experiment"
 	@echo "  benchmark    Cross-validate and compare the classifiers"
+	@echo "  robustness   Measure accuracy under evasion attacks"
+	@echo "  triage       Calibrate probabilities and fit an abstention policy"
+	@echo "  early-detect Classify cascades by propagation shape alone"
 	@echo "  train-transformer  Fine-tune the DistilBERT detector (needs extras)"
 	@echo "  test         Run the unit-test suite"
 	@echo "  clean        Remove caches and generated artefacts"
@@ -35,6 +38,15 @@ simulate:
 
 benchmark:
 	$(PY) -m fakenews.cli benchmark
+
+robustness:
+	$(PY) -m fakenews.cli robustness
+
+triage:
+	$(PY) -m fakenews.cli triage
+
+early-detect:
+	$(PY) -m fakenews.cli early-detect
 
 train-transformer:
 	$(PY) -m fakenews.cli train --arch transformer

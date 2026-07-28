@@ -55,7 +55,7 @@ def build_pipeline(config: Optional[ModelConfig] = None) -> Pipeline:
         feature_blocks.append(("style", StylometricFeatures()))
 
     steps = [
-        ("clean", TextCleaner()),
+        ("clean", TextCleaner(deobfuscate=config.deobfuscate)),
         ("features", FeatureUnion(feature_blocks)),
         # Scale to [0, 1] range without breaking sparsity — required so
         # MultinomialNB sees non-negative input and so mixed-scale features

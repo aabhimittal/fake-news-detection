@@ -117,6 +117,112 @@ def _cmd_makedata(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_robustness(args: argparse.Namespace) -> int:
+    from sklearn.model_selection import train_test_split
+
+    from .adversarial import evaluate_robustness, format_robustness
+    from .data import generate_synthetic_dataset
+
+    df = load_dataset(args.dataset) if args.dataset else generate_synthetic_dataset(
+        n_per_class=args.n
+    )
+    train, test = train_test_split(
+        df, test_size=0.3, random_state=0, stratify=df["label"]
+    )
+    X, y = test["text"].tolist(), test["label"].tolist()
+
+    print(f"Evaluating evasion robustness on {len(X)} held-out documents "
+          f"(attack rate {args.rate})\n")
+
+    bare = FakeNewsDetector(ModelConfig(random_state=0, use_stylometric=not args.lexical_only))
+    bare.fit(train)
+    undefended = evaluate_robustness(bare, X, y, rate=args.rate, defend=False)
+
+    guarded = FakeNewsDetector(
+        ModelConfig(random_state=0, deobfuscate=True,
+                    use_stylometric=not args.lexical_only)
+    )
+    guarded.fit(train)
+    defended = evaluate_robustness(guarded, X, y, rate=args.rate, defend=True)
+
+    print(format_robustness(undefended, defended))
+    worst = min(undefended.values())
+    print(f"\nWorst undefended accuracy: {worst:.3f} -> "
+          f"{min(defended.values()):.3f} with the normaliser enabled.")
+    return 0
+
+
+def _cmd_triage(args: argparse.Namespace) -> int:
+    from sklearn.model_selection import train_test_split
+
+    from .data import generate_benchmark_dataset
+    from .triage import (
+        ProbabilityCalibrator,
+        brier_score,
+        cost_optimal_threshold,
+        evaluate_policy,
+        expected_calibration_error,
+        fit_policy,
+    )
+
+    df = load_dataset(args.dataset) if args.dataset else generate_benchmark_dataset(
+        n_per_class=args.n, noise=args.noise
+    )
+    train, rest = train_test_split(df, test_size=0.5, random_state=0, stratify=df["label"])
+    # A three-way split: calibration must be fitted on data the model never saw,
+    # and the policy evaluated on data the calibrator never saw.
+    calib, test = train_test_split(
+        rest, test_size=0.5, random_state=0, stratify=rest["label"]
+    )
+
+    detector = FakeNewsDetector(ModelConfig(random_state=0))
+    detector.fit(train)
+
+    p_calib = detector.predict_proba(calib["text"].tolist())
+    p_test = detector.predict_proba(test["text"].tolist())
+    y_calib = calib["label"].to_numpy()
+    y_test = test["label"].to_numpy()
+
+    calibrator = ProbabilityCalibrator(args.method).fit(p_calib, y_calib)
+    p_cal = calibrator.transform(p_test)
+
+    print(f"Calibration ({args.method}) on {len(y_test)} held-out documents")
+    print(f"  raw        brier={brier_score(y_test, p_test):.4f}  "
+          f"ECE={expected_calibration_error(y_test, p_test):.4f}")
+    print(f"  calibrated brier={brier_score(y_test, p_cal):.4f}  "
+          f"ECE={expected_calibration_error(y_test, p_cal):.4f}\n")
+
+    policy = fit_policy(y_calib, calibrator.transform(p_calib),
+                        max_error_rate=args.max_error)
+    report = evaluate_policy(policy, y_test, p_cal)
+    print(f"Triage policy for a {args.max_error:.0%} automated-error budget")
+    print(f"  auto-real <= {policy.low:.2f}   review   >= {policy.high:.2f} auto-fake")
+    print(f"  {report.summary()}")
+
+    threshold, cost = cost_optimal_threshold(
+        y_test, p_cal, cost_false_positive=1.0, cost_false_negative=args.fn_cost
+    )
+    print(f"\nCost-optimal cutoff (false negative {args.fn_cost}x a false positive): "
+          f"{threshold:.2f} (expected cost {cost:.3f}/item)")
+    return 0
+
+
+def _cmd_early_detect(args: argparse.Namespace) -> int:
+    from .earlydetect import evaluate_early_detection, feature_importances
+
+    print(f"Simulating {args.n} cascades per class and classifying them by shape "
+          f"alone (no text)\n")
+    table = evaluate_early_detection(n_per_class=args.n, random_state=args.seed)
+    print(table.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+
+    print("\nMost informative shape features:")
+    for name, weight in feature_importances(
+        n_per_class=args.n, random_state=args.seed
+    ).head(5).items():
+        print(f"  {weight:.3f}  {name}")
+    return 0
+
+
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     from .benchmark import cross_validate_classifiers, format_table
     from .data import generate_benchmark_dataset
@@ -203,6 +309,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--noise", type=float, default=0.25,
                          help="difficulty of the synthetic benchmark, 0..1")
     p_bench.set_defaults(func=_cmd_benchmark)
+
+    p_rob = sub.add_parser("robustness",
+                           help="measure accuracy under evasion attacks, with/without the defence")
+    p_rob.add_argument("--dataset", help="CSV with text,label columns (else synthetic)")
+    p_rob.add_argument("--n", type=int, default=300, help="rows per class (synthetic)")
+    p_rob.add_argument("--rate", type=float, default=0.5, help="attack intensity, 0..1")
+    p_rob.add_argument("--lexical-only", action="store_true",
+                       help="drop stylometric features to isolate the lexical attack surface")
+    p_rob.set_defaults(func=_cmd_robustness)
+
+    p_tri = sub.add_parser("triage",
+                           help="calibrate probabilities and fit an abstention policy")
+    p_tri.add_argument("--dataset", help="CSV with text,label columns (else synthetic)")
+    p_tri.add_argument("--n", type=int, default=500, help="rows per class (synthetic)")
+    p_tri.add_argument("--noise", type=float, default=0.25, help="synthetic difficulty")
+    p_tri.add_argument("--method", default="isotonic", choices=["isotonic", "platt"])
+    p_tri.add_argument("--max-error", type=float, default=0.02,
+                       help="tolerated error rate on automated decisions")
+    p_tri.add_argument("--fn-cost", type=float, default=5.0,
+                       help="cost of a false negative relative to a false positive")
+    p_tri.set_defaults(func=_cmd_triage)
+
+    p_early = sub.add_parser("early-detect",
+                             help="classify cascades by propagation shape alone")
+    p_early.add_argument("--n", type=int, default=150, help="cascades per class")
+    p_early.add_argument("--seed", type=int, default=42)
+    p_early.set_defaults(func=_cmd_early_detect)
 
     return parser
 

@@ -44,6 +44,10 @@ class ModelConfig:
     # Whether to append hand-crafted stylometric features to the TF-IDF matrix.
     use_stylometric: bool = True
 
+    # Normalise deliberate obfuscation (homoglyphs, zero-width, leetspeak) before
+    # cleaning. Costs a little preprocessing time; see fakenews.adversarial.
+    deobfuscate: bool = False
+
 
 @dataclass
 class TransformerConfig:

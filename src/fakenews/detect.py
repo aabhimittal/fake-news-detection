@@ -73,11 +73,25 @@ class FakeNewsDetector:
     def _proba_of_fake(self, texts: Sequence[str]) -> np.ndarray:
         """Return P(fake) per text, working even for classifiers without predict_proba."""
         self._check_ready()
+        # An empty batch is routine in serving (an empty page, a filter that
+        # matched nothing). scikit-learn raises deep inside TfidfTransformer on
+        # zero rows, so short-circuit it here rather than leaking that error.
+        if len(texts) == 0:
+            return np.empty(0, dtype=float)
         if hasattr(self.pipeline, "predict_proba"):
             return self.pipeline.predict_proba(texts)[:, 1]
         # LinearSVC / PassiveAggressive expose decision_function; squash it.
         scores = np.asarray(self.pipeline.decision_function(texts), dtype=float)
         return 1.0 / (1.0 + np.exp(-scores))
+
+    def predict_proba(self, texts: Sequence[str]) -> np.ndarray:
+        """P(fake) for each document, as a numpy array.
+
+        Works for every supported classifier: those without ``predict_proba``
+        (LinearSVC, PassiveAggressive) get a sigmoid over ``decision_function``.
+        This is the input :mod:`fakenews.triage` expects.
+        """
+        return self._proba_of_fake(texts)
 
     def predict(self, text: str) -> Prediction:
         """Classify a single document."""

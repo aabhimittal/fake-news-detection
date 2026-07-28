@@ -99,16 +99,29 @@ class StylometricFeatures(BaseEstimator, TransformerMixin):
 
 
 class TextCleaner(BaseEstimator, TransformerMixin):
-    """Pipeline-friendly wrapper around :func:`fakenews.preprocess.clean_text`."""
+    """Pipeline-friendly wrapper around :func:`fakenews.preprocess.clean_text`.
 
-    def __init__(self, remove_stopwords: bool = False):
+    With ``deobfuscate=True`` the adversarial normaliser runs first, folding
+    homoglyphs, zero-width splits, leetspeak and letter-spacing back to ASCII so
+    an evasive document produces the same tokens as a plain one. Because it sits
+    inside the pipeline it is applied identically at train and predict time.
+    """
+
+    def __init__(self, remove_stopwords: bool = False, deobfuscate: bool = False):
         self.remove_stopwords = remove_stopwords
+        self.deobfuscate = deobfuscate
 
     def fit(self, X, y=None):  # noqa: N803
         return self
 
     def transform(self, X):  # noqa: N803
-        return [clean_text(doc, remove_stopwords=self.remove_stopwords) for doc in X]
+        docs = X
+        if self.deobfuscate:
+            # Imported lazily to keep this module free of a circular import.
+            from .adversarial import deobfuscate as _deob
+
+            docs = [_deob(doc) for doc in docs]
+        return [clean_text(doc, remove_stopwords=self.remove_stopwords) for doc in docs]
 
 
 def build_tfidf(config: ModelConfig) -> TfidfVectorizer:

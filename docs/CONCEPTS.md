@@ -240,7 +240,101 @@ the single most important practical lesson for platform-scale moderation.
 
 ---
 
-## 3. How the two halves connect
+## 3. Production hardening
+
+### 3.1 Adversarial evasion is a normalisation problem
+
+A bag-of-words model has a specific, exploitable weakness: it matches *tokens*.
+Anything that changes the codepoints while preserving human legibility — a
+Cyrillic `а`, a zero-width space, `v4cc1n3`, `shoooocking` — turns a known
+feature into an unknown one, and the model silently loses the evidence it was
+relying on.
+
+The cheapest robust answer is **normalisation, not detection**. Rather than try
+to judge whether obfuscation was malicious (an arms race), we map every variant
+onto one canonical form so the model sees the same token either way. This is
+deterministic, costs one pass over the string, and cannot be defeated by tuning
+the obfuscation rate.
+
+The engineering difficulty is entirely in the **false-positive direction**: an
+over-eager normaliser corrupts legitimate text. Three concrete rules earn their
+place in `fakenews.adversarial`:
+
+* Collapse repeated **letters** only, so `!!!` — a real stylometric signal —
+  survives. Runs of 3+ collapse to *one* letter, because genuine doubles
+  ("coffee") are runs of 2 and are never touched. Measured on the sample corpus
+  this recovers the original token in ~52% of attacked documents with **zero**
+  corruption of clean text; collapsing to two recovers none.
+* De-leet a digit only when it is not part of a multi-digit run *unless* that run
+  is embedded between letters — so `exp05ed` is recovered while `covid19` and
+  `2024` are not touched. Tokens of 2 characters are skipped entirely, protecting
+  `5G`, `4K`, `3D`.
+* Substitute punctuation-leet (`$`, `@`, `!`) only when a letter *follows* it.
+  `$hocking` is recovered; `BREAKING!!!` keeps its exclamation marks.
+
+A useful empirical result falls out of measuring rather than assuming: the
+**stylometric features are incidentally robust**. Shouting and exclamation spam
+survive homoglyph and leetspeak substitution, so a model carrying them degrades
+noticeably less than a lexical-only one. Defence in depth applies to features
+too.
+
+### 3.2 Calibration, abstention and the cost of being wrong
+
+Three separate ideas hide behind "how confident is the model?".
+
+**Calibration** asks whether a score of 0.9 corresponds to being right 90% of the
+time. Margin-based classifiers are systematically over-confident, so raw scores
+are not probabilities and any threshold set on them means something other than
+what you think. *Expected Calibration Error* buckets predictions by confidence
+and averages |confidence − accuracy| across buckets; the *Brier score* is the
+mean squared error of the probabilities. Isotonic regression (flexible,
+needs data) or Platt scaling (two parameters, safe on small sets) fixes the
+mapping — fitted on a **held-out** split, since calibrating on training scores
+merely relearns the model's own over-confidence.
+
+**Abstention** asks which calls are safe to make at all. A selective classifier
+answers only outside an uncertainty band and routes the rest to a human. The
+diagnostic is the **risk–coverage curve**: as you abstain more, does the error
+rate on what remains fall steeply? If it does not, the model's confidence is not
+informative, which is itself a crucial finding.
+
+`fit_policy` inverts the usual question into the one operations teams actually
+plan against: *given a tolerated automated-error budget, how much of the queue
+can we automate?* On separable data that is 100%; on noisy data it correctly
+collapses toward "review everything" rather than quietly exceeding the budget.
+A caveat worth stating: a policy fitted on finite validation data still shows a
+generalisation gap, so it must be re-validated and monitored, not set once.
+
+**Cost asymmetry** is a policy input, not a modelling one. Missing a fake story
+and censoring a real one are not equally bad, and the ratio moves the optimal
+cutoff away from 0.5 — downward as false negatives get more expensive.
+
+### 3.3 Detecting by structure: the confound that makes it easy to fool yourself
+
+Cascade-shape detection rests on a real empirical finding (Vosoughi et al.,
+*Science* 2018): false stories travel deeper, through longer person-to-person
+chains, while true stories are more often broadcast once and stop. **Structural
+virality** — mean pairwise distance in the diffusion tree — is the measure that
+separates the two even at equal cascade size: a star scores ~1.8, a chain ~4.0.
+
+The methodological trap is worth more than the result. The intuitive setup —
+seed "real" cascades from hubs and "fake" ones from ordinary users — produces a
+detector with 98% accuracy after a **single** step. It looks superb and is
+worthless: it is reading the poster's follower count, and would collapse the
+moment a fake story is posted by a popular account. The size gap at step 1 was
+4x, and no shape feature was doing any work.
+
+Removing the confound (identical seeding, identical hop-0 dynamics, differing
+only in whether chains persist) yields an honest curve: **near chance at one
+step, ~0.82 by step three, then a plateau**. Depth-based features carry the
+signal, exactly as the theory predicts. The general lesson: when a structural
+model performs suspiciously well *immediately*, check whether it has access to a
+proxy for the label that has nothing to do with the structure you meant to
+measure.
+
+---
+
+## 4. How the two halves connect
 
 In a deployed system the loop is:
 
