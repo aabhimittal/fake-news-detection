@@ -20,6 +20,9 @@ and — importantly — a conceptual explanation of *why* each algorithm works.
                                         │
                                         ▼
         social graph ─▶ diffusion model ─▶ containment strategy   (Part 2: propagation)
+                              │
+                              ▼
+        cascade shape ─▶ early detection / triage / evasion defence  (Part 3: hardening)
 ```
 
 ---
@@ -42,6 +45,10 @@ and — importantly — a conceptual explanation of *why* each algorithm works.
   - [Step 3: Containment strategies](#step-3-containment-strategies)
   - [Step 4: Greedy influence-maximisation](#step-4-greedy-influence-maximisation)
   - [Step 5: The result](#step-5-the-result)
+- [Part 3 — Production hardening](#part-3--production-hardening)
+  - [Surviving deliberate evasion](#surviving-deliberate-evasion)
+  - [Knowing when *not* to answer](#knowing-when-not-to-answer)
+  - [Detecting by shape, not words](#detecting-by-shape-not-words)
 - [Project layout](#project-layout)
 - [Using your own dataset](#using-your-own-dataset)
 - [REST API](#rest-api)
@@ -317,6 +324,107 @@ important accounts, not uniformly.*
 
 ---
 
+## Part 3 — Production hardening
+
+Parts 1 and 2 give a working detector and a containment plan. Deploying them
+raises three problems that accuracy alone does not answer.
+
+### Surviving deliberate evasion
+
+Once a platform filters on words, operators obfuscate those words — while
+keeping them perfectly readable to humans:
+
+| Attack | Example | What the model sees |
+|--------|---------|---------------------|
+| Homoglyph | `vаccine` (Cyrillic а) | a different token |
+| Zero-width | `vac\u200bcine` | two tokens |
+| Leetspeak | `v4cc1n3` | out of vocabulary |
+| Repetition | `shoooocking` | out of vocabulary |
+| Letter spacing | `s h o c k i n g` | eight 1-char tokens |
+| Diacritics | `shöcking` | a different token |
+
+`fakenews.adversarial.deobfuscate` folds all six back to canonical ASCII, and —
+critically — the module also *measures* the damage rather than assuming a fix:
+
+```bash
+python -m fakenews.cli robustness --rate 0.5 --lexical-only
+```
+
+```
+      attack | undefended |  defended | recovered
+-------------------------------------------------
+   homoglyph |      0.987 |     1.000 |    +0.013
+  zero_width |      0.900 |     1.000 |    +0.100
+  repetition |      0.840 |     1.000 |    +0.160
+```
+
+Enable it in the pipeline with `ModelConfig(deobfuscate=True)`; it then runs
+identically at train and predict time.
+
+Two findings worth keeping: the **stylometric features are incidentally robust**
+(shouting and `!!!` survive obfuscation, so the full model degrades less than a
+lexical-only one), and the normaliser is deliberately conservative — `covid19`,
+`2024`, `5G` and `BREAKING!!!` are provably left intact, which the test suite
+enforces as a regression guard.
+
+### Knowing when *not* to answer
+
+A deployed moderation system must decide **which calls are safe to make
+automatically**. `fakenews.triage` provides the three missing pieces:
+probability **calibration** (so 0.9 means "right 90% of the time", measured by
+Brier score and Expected Calibration Error), an **abstention policy** that
+auto-decides only outside an uncertainty band, and **cost-sensitive thresholds**
+for when a false negative is worse than a false positive.
+
+```bash
+python -m fakenews.cli triage --max-error 0.02 --fn-cost 5
+```
+
+`fit_policy` inverts the usual question. Instead of "how accurate is the model?"
+it answers *"given that we tolerate at most 2% mistakes on automated calls, how
+much of the queue can we automate?"* — the number an operations team plans
+against. On a clean corpus that is 100% coverage; on a noisy one it correctly
+collapses toward "send everything to a human" rather than quietly exceeding the
+budget. Note the policy is fitted on a held-out split and still shows a
+generalisation gap on fresh data, so in production it should be re-validated and
+monitored, not set once.
+
+### Detecting by shape, not words
+
+`fakenews.earlydetect` classifies a story from **how it spreads** — using no
+text at all. Following Vosoughi et al. (*Science*, 2018), false stories travel
+deeper through longer person-to-person chains, while true ones are more often
+broadcast once and stop. The discriminating measure is **structural virality**
+(mean pairwise distance in the diffusion tree): a star-shaped broadcast scores
+~1.8, a long chain ~4.0.
+
+```bash
+python -m fakenews.cli early-detect
+```
+
+```
+ window  accuracy    f1     <- how long we watch the cascade
+1 steps     0.557         near chance: indistinguishable
+2 steps     0.610
+3 steps     0.817         chains diverge; signal appears
+   full     0.817         plateau -- watching longer adds nothing
+```
+
+This is worth reading carefully, because **the first version of this experiment
+was wrong**. Seeding "real" cascades from hubs and "fake" ones from ordinary
+users gave 98% accuracy after a *single* step — but that detector was reading
+the poster's follower count, not the spread, and would collapse the moment a
+fake story got posted by a popular account. The regimes are now seeded
+identically and differ *only* in whether resharing chains persist, so any signal
+has to come from structure. The honest result: you cannot tell at step 1, and by
+step 3 you can. Depth-based features carry it (`mean_depth`, `max_depth`,
+`structural_virality`), which is exactly what the theory predicts.
+
+Being text-free makes this complementary to Part 1 — it is language-independent,
+works on images and video, and cannot be evaded by rewording.
+
+---
+
 ## Project layout
 
 ```
@@ -331,11 +439,14 @@ fake-news-detection/
 │   ├── detect.py         # FakeNewsDetector — the high-level linear API
 │   ├── transformer.py    # TransformerDetector — optional fine-tuned DistilBERT
 │   ├── benchmark.py      # cross-validation harness + LIAR/Kaggle loaders
+│   ├── adversarial.py    # evasion attacks + the deobfuscation defence
+│   ├── triage.py         # calibration, abstention policy, cost-aware cutoffs
+│   ├── earlydetect.py    # cascade-shape features + early detection
 │   ├── propagation.py    # network, diffusion model, containment strategies
 │   └── cli.py            # `python -m fakenews.cli ...`
 ├── app/api.py            # optional Flask REST demo
 ├── scripts/plot_propagation.py
-├── tests/                # 25 unit tests (pytest)
+├── tests/                # 126 tests (pytest), incl. industrial edge cases
 ├── docs/                 # CONCEPTS.md, ARCHITECTURE.md, figure
 ├── data/sample_news.csv  # generated sample dataset
 ├── Makefile              # make train | predict | simulate | test
@@ -381,8 +492,18 @@ curl -s localhost:5000/predict -H 'Content-Type: application/json' \
 
 ```bash
 pip install pytest
-pytest                    # 25 tests covering every module
+pytest                    # 126 tests covering every module
 ```
+
+`tests/test_edge_cases.py` is the industrial-hardening suite: empty and
+whitespace-only documents, 200 kB inputs, emoji / CJK / RTL / mixed-script text,
+control bytes, malformed and NaN-bearing CSVs, embedded delimiters, single-class
+and 99:1-imbalanced training data, degenerate graphs (single node, disconnected,
+budget larger than the network), probability boundaries, determinism, save/load
+fidelity and concurrent prediction. Every case must either work or **fail
+loudly** — a silent wrong answer is the one outcome that is never acceptable.
+It found a real bug on first run: predicting on an *empty batch* crashed inside
+scikit-learn instead of returning `[]`, which is now fixed and guarded.
 
 ## Further reading
 

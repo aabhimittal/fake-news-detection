@@ -16,6 +16,9 @@ fakenews/
 ├── detect.py        FakeNewsDetector — the linear public façade
 ├── transformer.py   TransformerDetector — optional fine-tuned DistilBERT
 ├── benchmark.py     cross-validation harness + LIAR/Kaggle loaders
+├── adversarial.py   evasion attacks + deobfuscation defence
+├── triage.py        calibration, abstention policy, cost-aware cutoffs
+├── earlydetect.py   diffusion trees, cascade-shape features, early detection
 ├── propagation.py   graph + Independent Cascade + containment strategies
 └── cli.py           argparse entry point (train / predict / simulate / benchmark / make-data)
 ```
@@ -99,9 +102,24 @@ compared on identical folds. Real-corpus specifics (LIAR's 6-way scale, Kaggle's
 two-file layout) live in dedicated loaders that normalise down to the same
 `text`/`label` frame, keeping the harness itself corpus-agnostic.
 
+### 8. Defences are measured, not assumed
+
+`adversarial.py` ships the **attacks alongside the defence**, and `triage.py`
+ships calibration *metrics* alongside the calibrators. This is deliberate: a
+normaliser or a confidence score that is never adversarially measured is a
+guess. Every claim in the docs is reproducible from a CLI subcommand
+(`robustness`, `triage`, `early-detect`).
+
+### 9. Numeric surfaces take arrays, not detectors
+
+`triage.py` operates on `(y_true, p_fake)` rather than on a detector object, so
+it works with the linear model, the transformer, or an external scorer, and is
+trivially testable without training anything. `predict_proba` on both detectors
+is the single adapter into it.
+
 ## Testing strategy
 
-`tests/` (35+ tests, pytest) covers each module at the right altitude:
+`tests/` (126 tests, pytest) covers each module at the right altitude:
 
 - **Unit** — preprocessing rules, stylometric feature values, dataset shape and
   determinism, graph size, monitor-budget selection, LIAR label mapping.
@@ -113,6 +131,15 @@ two-file layout) live in dedicated loaders that normalise down to the same
   real checkpoint, so it runs only when `torch`+`transformers` are present *and*
   `FAKENEWS_RUN_TRANSFORMER=1` is set. Its interface contracts (predict-before-
   fit, config defaults, the no-backend error path) always run.
+
+- **Industrial edge cases** (`test_edge_cases.py`) — the inputs production
+  actually delivers: empty/whitespace/control-byte documents, 200 kB inputs,
+  emoji, CJK, RTL and mixed scripts, malformed and NaN-bearing CSVs, embedded
+  delimiters, single-class and 99:1-imbalanced training sets, degenerate graphs,
+  probability boundaries, determinism, save/load fidelity and concurrent
+  prediction. The standard is *works* or *fails loudly* — never a silent wrong
+  answer. This suite found a real bug on its first run (empty batch crashing
+  inside scikit-learn), which is now fixed and guarded.
 
 `conftest.py` puts `src/` on the path so tests run without an editable install.
 Simulation and greedy tests use small graphs and few Monte-Carlo runs to stay
